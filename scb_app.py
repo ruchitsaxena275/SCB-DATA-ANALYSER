@@ -42,8 +42,8 @@ def process_file(df):
     return df
 
 # ----------------- Weak SCB Identification -----------------
-def find_weak_scbs(df, threshold=0.94, min_fraction=0.3):
-    """Return SCBs weak for at least 30% of time."""
+def find_weak_scbs(df, threshold=0.90, min_fraction=0.7):
+    """Return SCBs weak for at least 70% of time."""
     cr_cols = [col for col in df.columns if col.startswith("CR_")]
     weak_counts = {}
 
@@ -161,4 +161,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
