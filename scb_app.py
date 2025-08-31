@@ -11,7 +11,7 @@ STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
-I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.31 A per module
+I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
 
 # ----------------- Processing Function -----------------
 def process_file(df):
@@ -129,7 +129,7 @@ def main():
         # Weak SCBs (CR<0.94 for >=30% time)
         weak_df = find_weak_scbs(df_filtered)
 
-        st.write("### 🚨 Weak SCBs (CR < 0.94 for ≥30% of time):")
+        st.write("### 🚨 Weak SCBs (CR < 0.90 for ≥80% of time):")
         st.dataframe(weak_df)
 
         # Download Processed Data
@@ -161,3 +161,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
