@@ -69,4 +69,5 @@ def tag_weak_strings(df):
 # ----------------- Streamlit App -----------------
 def main():
     st.title("🔍 SCB Current Analyzer with Weak SCB Identification")
-    st.write("Upl
+   st.write("Upload your file and analyze SCB currents below.")
+
