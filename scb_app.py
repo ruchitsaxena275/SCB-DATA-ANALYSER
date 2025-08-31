@@ -1,123 +1,155 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
+import matplotlib.pyplot as plt
 
-# ----------------- Core Functions -----------------
+# ----------------- Constants -----------------
+MODULE_POWER_WP = 545.0        # Module Watt-peak
+MODULE_VOC = 49.91             # Voc at STC
+VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
+STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 
-def calculate_expected_current(irradiance, factor=0.1):
-    """Calculate expected SCB current from irradiance (adjust factor as needed)."""
-    return irradiance * factor
+VMP = MODULE_VOC * VMP_VOC_RATIO
+I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.31 A per module
 
+# ----------------- Processing Function -----------------
+def process_file(df):
+    """Calculate Expected SCB Current & CR for each SCB."""
+    df = df.copy()
+    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First column is timestamp
+    df = df.set_index(df.columns[0])               # Set datetime index
 
-def process_scb_data(df):
-    """
-    Process SCB data:
-    - Calculates Expected Current
-    - Computes CR (Current Ratio)
-    - Identifies Weak SCBs (low CR for >30% of time)
-    - Colors weak strings for CSV
-    """
+    irr_col = df.columns[-1]  # Last column is irradiance
+    irr = df[irr_col].astype(float)
 
-    irr_col = "Irradiance"
-    scb_cols = [col for col in df.columns if col.startswith("SCB")]
+    expected_str_current = I_MODULE_STC * (irr / 1000.0)
+    expected_scb_current = expected_str_current * STRINGS_PER_SCB
+    df["Expected_SCB_Current"] = expected_scb_current
 
-    if irr_col not in df.columns:
-        raise ValueError(f"Missing required column: '{irr_col}'")
-
-    # Calculate Expected Current
-    df["Expected_Current"] = df[irr_col].apply(calculate_expected_current)
-
-    # Compute CR for each SCB
+    # Calculate CR for each SCB current column
+    scb_cols = df.columns[:-2]  # All but last (irradiance) and Expected
     for col in scb_cols:
-        cr_col = f"CR_{col}"
-        df[cr_col] = df[col] / df["Expected_Current"]
+        df[f"CR_{col}"] = np.where(
+            expected_scb_current > 0,
+            df[col].astype(float) / expected_scb_current,
+            np.nan
+        )
 
-    # Determine Weak SCBs
-    weak_data = []
-    threshold = 0.9  # CR threshold
-    weak_cols = []
+    return df
 
-    for col in scb_cols:
-        cr_col = f"CR_{col}"
-        low_ratio = (df[cr_col] < threshold).mean()
-        if low_ratio > 0.3:  # Weak if >30% of time
-            weak_data.append({"SCB": col, "Low_Percentage": round(low_ratio * 100, 2)})
-            weak_cols.append(col)
+# ----------------- Weak SCB Identification -----------------
+def find_weak_scbs(df, threshold=0.94, min_fraction=0.3):
+    """Return SCBs weak for at least 30% of time."""
+    cr_cols = [col for col in df.columns if col.startswith("CR_")]
+    weak_counts = {}
 
-    weak_df = pd.DataFrame(weak_data)
+    for col in cr_cols:
+        total = len(df)
+        weak = (df[col] < threshold).sum()
+        if total > 0 and (weak / total) >= min_fraction:
+            weak_counts[col] = round((weak / total) * 100, 2)
 
-    # Create tag columns
-    def tag_value(value, is_weak):
-        return "🔴 Weak" if is_weak else "🟢 OK"
+    weak_df = pd.DataFrame(list(weak_counts.items()), columns=["SCB", "Weak_%"])
+    return weak_df
 
-    tag_cols = {}
-    for col in scb_cols:
-        is_weak = col in weak_cols
-        tag_cols[f"Tag_{col}"] = [tag_value(v, is_weak) for v in df[col]]
+# ----------------- Weak String Color Tagging -----------------
+def tag_weak_strings(df):
+    """Add a Weakness Tag column for CSV export."""
+    tag_df = df.copy()
+    cr_cols = [col for col in tag_df.columns if col.startswith("CR_")]
 
-    tag_df = pd.DataFrame(tag_cols)
-    df = pd.concat([df, tag_df], axis=1)
-
-    return df, weak_df
-
+    for col in cr_cols:
+        tag_df[col] = np.select(
+            [tag_df[col] < 0.9, tag_df[col] < 1.0],
+            ["RED", "ORANGE"],
+            default="OK"
+        )
+    return tag_df
 
 # ----------------- Streamlit App -----------------
-
 def main():
     st.title("🔍 SCB Current Analyzer with Weak SCB Identification")
-    st.write("Upload your **CSV or Excel** file and analyze SCB currents below.")
+    st.write("Upload SCB-level current data with irradiance. Generates CR, tags weak strings, and identifies SCBs weak >30% of time.")
 
-    uploaded_file = st.file_uploader("📂 Upload CSV or Excel", type=["csv", "xlsx", "xls"])
-
+    uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
-        try:
-            # Read file dynamically
-            if uploaded_file.name.endswith(".csv"):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+        # Read file
+        if uploaded_file.name.endswith(".csv"):
+            raw_df = pd.read_csv(uploaded_file)
+        else:
+            raw_df = pd.read_excel(uploaded_file)
 
-            st.success("✅ File uploaded successfully!")
+        st.success("✅ File uploaded successfully!")
+        st.write("### 📜 Raw Data Preview:")
+        st.dataframe(raw_df.head())
 
-            st.subheader("Raw Data Preview")
-            st.dataframe(df.head())
+        # Process
+        df_processed = process_file(raw_df)
 
-            # Process data
-            processed_df, weak_scbs = process_scb_data(df)
+        # Time Filter
+        min_time = df_processed.index.min()
+        max_time = df_processed.index.max()
+        start_time, end_time = st.slider(
+            "⏱️ Select Time Range",
+            min_value=min_time.to_pydatetime(),
+            max_value=max_time.to_pydatetime(),
+            value=(min_time.to_pydatetime(), max_time.to_pydatetime()),
+            format="HH:mm"
+        )
+        df_filtered = df_processed.loc[start_time:end_time]
 
-            st.subheader("📊 Processed Results")
-            st.dataframe(processed_df.head())
+        st.write(f"### 🔍 Processed Data ({len(df_filtered)} rows):")
+        st.dataframe(df_filtered.head())
 
-            # Download Processed CSV
-            csv = processed_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="⬇️ Download Processed CSV (with tags)",
-                data=csv,
-                file_name="processed_scb_data.csv",
-                mime="text/csv"
-            )
+        # Plot
+        st.subheader("📈 Current Ratio Trends")
+        cr_cols = [c for c in df_filtered.columns if c.startswith("CR_")]
+        plt.figure(figsize=(12, 5))
+        for col in cr_cols:
+            plt.plot(df_filtered.index, df_filtered[col], alpha=0.5, label=col)
+        plt.axhline(1.0, color="green", linestyle="--")
+        plt.axhline(0.9, color="red", linestyle="--")
+        plt.xlabel("Time")
+        plt.ylabel("CR")
+        plt.legend()
+        plt.grid(True)
+        st.pyplot(plt)
 
-            # Weak SCB Download
-            if weak_scbs is not None and not weak_scbs.empty:
-                st.subheader("⚠️ Weak SCBs Detected")
-                st.dataframe(weak_scbs)
+        # Add Weak Tagging
+        tagged_df = tag_weak_strings(df_filtered)
 
-                weak_csv = weak_scbs.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="⬇️ Download Weak SCBs CSV",
-                    data=weak_csv,
-                    file_name="weak_scbs.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.info("✅ No Weak SCBs Found.")
+        # Weak SCBs (CR<0.94 for >=30% time)
+        weak_df = find_weak_scbs(df_filtered)
 
-        except Exception as e:
-            st.error(f"❌ An error occurred: {e}")
+        st.write("### 🚨 Weak SCBs (CR < 0.94 for ≥30% of time):")
+        st.dataframe(weak_df)
 
-    else:
-        st.info("⬆️ Please upload a CSV or Excel file to start.")
+        # Download Processed Data
+        csv_processed = df_filtered.to_csv(index=True).encode('utf-8')
+        st.download_button(
+            label="📥 Download Processed Data (Full Calculations)",
+            data=csv_processed,
+            file_name="processed_scb_data.csv",
+            mime="text/csv",
+        )
 
+        # Download Weak-Tagged CSV
+        csv_tagged = tagged_df.to_csv(index=True).encode('utf-8')
+        st.download_button(
+            label="📥 Download Weak-Tagged CSV",
+            data=csv_tagged,
+            file_name="weak_strings_report.csv",
+            mime="text/csv",
+        )
+
+        # Download Weak SCB List
+        csv_weak = weak_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Weak SCB List (CR<0.94, >30% Time)",
+            data=csv_weak,
+            file_name="weak_scb_summary.csv",
+            mime="text/csv",
+        )
 
 if __name__ == "__main__":
     main()
