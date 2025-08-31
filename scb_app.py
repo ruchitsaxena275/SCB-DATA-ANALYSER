@@ -18,9 +18,11 @@ def process_scb_data(df):
     - Colors weak strings for CSV
     """
 
-    # Identify columns dynamically
     irr_col = "Irradiance"
     scb_cols = [col for col in df.columns if col.startswith("SCB")]
+
+    if irr_col not in df.columns:
+        raise ValueError(f"Missing required column: '{irr_col}'")
 
     # Calculate Expected Current
     df["Expected_Current"] = df[irr_col].apply(calculate_expected_current)
@@ -37,18 +39,16 @@ def process_scb_data(df):
 
     for col in scb_cols:
         cr_col = f"CR_{col}"
-        low_ratio = (df[cr_col] < threshold).mean()  # percentage of time CR < threshold
-        if low_ratio > 0.3:  # more than 30% time weak
+        low_ratio = (df[cr_col] < threshold).mean()
+        if low_ratio > 0.3:  # Weak if >30% of time
             weak_data.append({"SCB": col, "Low_Percentage": round(low_ratio * 100, 2)})
             weak_cols.append(col)
 
     weak_df = pd.DataFrame(weak_data)
 
-    # Create color tags for easy Excel review
+    # Create tag columns
     def tag_value(value, is_weak):
-        if is_weak:
-            return "🔴 Weak"
-        return "🟢 OK"
+        return "🔴 Weak" if is_weak else "🟢 OK"
 
     tag_cols = {}
     for col in scb_cols:
@@ -65,25 +65,30 @@ def process_scb_data(df):
 
 def main():
     st.title("🔍 SCB Current Analyzer with Weak SCB Identification")
-    st.write("Upload your file and analyze SCB currents below.")
+    st.write("Upload your **CSV or Excel** file and analyze SCB currents below.")
 
-    uploaded_file = st.file_uploader("📂 Upload your CSV file", type=["csv"])
+    uploaded_file = st.file_uploader("📂 Upload CSV or Excel", type=["csv", "xlsx", "xls"])
 
     if uploaded_file is not None:
         try:
-            df = pd.read_csv(uploaded_file)
+            # Read file dynamically
+            if uploaded_file.name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+
             st.success("✅ File uploaded successfully!")
 
-            # Show raw data
             st.subheader("Raw Data Preview")
             st.dataframe(df.head())
 
-            # Process Data
-            st.subheader("📊 Processed Results")
+            # Process data
             processed_df, weak_scbs = process_scb_data(df)
+
+            st.subheader("📊 Processed Results")
             st.dataframe(processed_df.head())
 
-            # Download processed data
+            # Download Processed CSV
             csv = processed_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="⬇️ Download Processed CSV (with tags)",
@@ -92,7 +97,7 @@ def main():
                 mime="text/csv"
             )
 
-            # Download Weak SCBs separately
+            # Weak SCB Download
             if weak_scbs is not None and not weak_scbs.empty:
                 st.subheader("⚠️ Weak SCBs Detected")
                 st.dataframe(weak_scbs)
@@ -111,7 +116,7 @@ def main():
             st.error(f"❌ An error occurred: {e}")
 
     else:
-        st.info("⬆️ Please upload a CSV file to start.")
+        st.info("⬆️ Please upload a CSV or Excel file to start.")
 
 
 if __name__ == "__main__":
