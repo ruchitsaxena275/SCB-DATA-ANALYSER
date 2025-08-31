@@ -8,6 +8,7 @@ MODULE_POWER_WP = 545.0        # Module Watt-peak
 MODULE_VOC = 49.91             # Voc at STC
 VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
 STRINGS_PER_SCB = 18           # Correct number of strings per SCB
+IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
 I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.31 A per module
@@ -22,7 +23,10 @@ def process_file(df):
     irr_col = df.columns[-1]  # Last column is irradiance
     irr = df[irr_col].astype(float)
 
-    expected_str_current = I_MODULE_STC * (irr / 1000.0)
+    # 🔍 Filter out rows with irradiance <500 W/m²
+    df = df[irr >= IRRADIANCE_THRESHOLD]
+
+    expected_str_current = I_MODULE_STC * (irr[irr >= IRRADIANCE_THRESHOLD] / 1000.0)
     expected_scb_current = expected_str_current * STRINGS_PER_SCB
     df["Expected_SCB_Current"] = expected_scb_current
 
@@ -69,7 +73,7 @@ def tag_weak_strings(df):
 # ----------------- Streamlit App -----------------
 def main():
     st.title("🔍 SCB Current Analyzer with Weak SCB Identification")
-    st.write("Upload SCB-level current data with irradiance. Generates CR, tags weak strings, and identifies SCBs weak >30% of time.")
+    st.write("Upload SCB-level current data with irradiance. Rows with irradiance <500 W/m² are filtered out for better accuracy.")
 
     uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
@@ -85,6 +89,10 @@ def main():
 
         # Process
         df_processed = process_file(raw_df)
+
+        if df_processed.empty:
+            st.warning("⚠️ No data available after filtering irradiance <500 W/m²!")
+            return
 
         # Time Filter
         min_time = df_processed.index.min()
