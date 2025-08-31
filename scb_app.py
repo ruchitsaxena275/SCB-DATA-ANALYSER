@@ -2,120 +2,109 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# -------- Constants --------
-MODULE_POWER_WP = 545.0     # Module watt-peak rating
-MODULE_VOC = 49.91          # Module Voc
-VMP_VOC_RATIO = 0.82        # Vmp/Voc ratio
+# ----------------- Constants -----------------
+MODULE_POWER_WP = 545.0        # Module Watt-peak
+MODULE_VOC = 49.91             # Voc at STC
+VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
+NUM_STRINGS = 18               # Strings per SCB
+
 VMP = MODULE_VOC * VMP_VOC_RATIO
-I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈ 13.33 A
-CR_LOW_THRESHOLD = 0.95     # Weak string threshold
-IRRADIANCE_MIN = 200        # Ignore low irradiance (W/m²)
+I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.31 A per module
+CR_LOW_THRESHOLD = 0.90
 
-# -------- Functions --------
+
+# ----------------- Processing Function -----------------
 def process_file(df):
     """
-    Takes uploaded raw data, calculates expected currents,
-    current ratios, and prepares for plotting/summary.
+    Process raw SCB data (1-min resolution) and calculate:
+    - Expected current per string
+    - Current Ratio (CR) per string
+    - Expected & measured SCB total current
     """
     df = df.copy()
-    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First col = timestamp
-    df = df.set_index(df.columns[0])
+    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First column is timestamp
+    df = df.set_index(df.columns[0])               # Set datetime index
 
-    # Identify measured current columns (all numeric until irradiance col)
-    measured_cols = df.columns[df.columns.str.contains("_ME_A")]
-    irr_col = df.columns[-1]  # Assuming last col is irradiance
+    measured_cols = df.columns[0:NUM_STRINGS]      # String currents (B..S)
+    irr_col = df.columns[23]                       # Irradiance (Y)
 
     measured = df[measured_cols].astype(float)
     irr = df[irr_col].astype(float)
 
-    # Calculate expected current per string
     expected_str_current = I_MODULE_STC * (irr / 1000.0)
 
     result = measured.copy()
     for i, col in enumerate(measured_cols, start=1):
         result[f"Expected_String_{i}"] = expected_str_current
-        result[f"CR_String_{i}"] = np.where(
-            expected_str_current > 0,
-            result[col] / expected_str_current,
-            np.nan
-        )
+        result[f"CR_String_{i}"] = np.where(expected_str_current > 0,
+                                            measured[col] / expected_str_current,
+                                            np.nan)
 
-    result["Expected_SCB_Current"] = expected_str_current * len(measured_cols)
+    result["Expected_SCB_Current"] = expected_str_current * NUM_STRINGS
     result["Measured_SCB_Current"] = measured.sum(axis=1)
     result["Irradiance_Wm2"] = irr
-
-    # Filter out rows with very low irradiance
-    result = result[irr > IRRADIANCE_MIN]
 
     return result
 
 
-def plot_heatmap(df):
-    """
-    Creates a heatmap of CR values for all strings over time.
-    """
-    cr_cols = [c for c in df.columns if c.startswith("CR_String_")]
-    cr_matrix = df[cr_cols]
+# ----------------- Streamlit App -----------------
+def main():
+    st.title("SCB String Current Analyzer (1-min data)")
+    st.write("Upload your SCB Excel file (1-minute data) to analyze weak strings.")
 
-    fig, ax = plt.subplots(figsize=(14, 6))
-    im = ax.imshow(cr_matrix.T, aspect='auto', origin='lower', vmin=0.0, vmax=1.4)
+    uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
+    if uploaded_file is not None:
+        # Read data
+        if uploaded_file.name.endswith(".csv"):
+            raw_df = pd.read_csv(uploaded_file)
+        else:
+            raw_df = pd.read_excel(uploaded_file)
 
-    ax.set_yticks(np.arange(len(cr_cols)))
-    ax.set_yticklabels([f"String {i+1}" for i in range(len(cr_cols))])
+        st.success("File uploaded successfully!")
+        st.write("### Raw Data Preview:")
+        st.dataframe(raw_df.head())
 
-    xticks = np.linspace(0, len(cr_matrix)-1, min(12, len(cr_matrix))).astype(int)
-    ax.set_xticks(xticks)
-    ax.set_xticklabels([df.index[i].strftime("%m-%d %H:%M") for i in xticks], rotation=45, ha='right')
+        # Process data
+        df_processed = process_file(raw_df)
 
-    ax.set_title("String Current Ratio (CR) Heatmap")
-    fig.colorbar(im, ax=ax, label="CR (Measured / Expected)")
-    st.pyplot(fig)
+        # Time Range Filter
+        min_time = df_processed.index.min()
+        max_time = df_processed.index.max()
+        start_time, end_time = st.slider(
+            "Select Time Range",
+            min_value=min_time.to_pydatetime(),
+            max_value=max_time.to_pydatetime(),
+            value=(min_time.to_pydatetime(), max_time.to_pydatetime()),
+            format="HH:mm"
+        )
+        df_filtered = df_processed.loc[start_time:end_time]
+
+        st.write(f"### Processed Data ({len(df_filtered)} rows):")
+        st.dataframe(df_filtered.head())
+
+        # Heatmap for Current Ratio
+        st.subheader("Current Ratio Heatmap (CR per string)")
+        cr_cols = [col for col in df_filtered.columns if col.startswith("CR_String_")]
+        cr_data = df_filtered[cr_cols]
+
+        plt.figure(figsize=(15, 6))
+        sns.heatmap(cr_data.T, cmap="coolwarm", cbar=True, vmin=0.7, vmax=1.1)
+        plt.title("Current Ratio (CR) Heatmap per String")
+        plt.xlabel("Time")
+        plt.ylabel("Strings")
+        st.pyplot(plt)
+
+        # Download button
+        csv = df_filtered.to_csv().encode('utf-8')
+        st.download_button(
+            label="Download Processed CSV",
+            data=csv,
+            file_name="processed_scb_data.csv",
+            mime="text/csv",
+        )
 
 
-def daily_summary(df):
-    """
-    Summarizes weak strings per day based on CR threshold.
-    """
-    cr_cols = [c for c in df.columns if c.startswith("CR_String_")]
-    df2 = df[cr_cols].copy()
-    df2["date"] = df.index.date
-
-    grouped = df2.groupby("date")
-    rows = []
-
-    for date, grp in grouped:
-        weak = []
-        for i, c in enumerate(cr_cols, start=1):
-            frac = (grp[c] < CR_LOW_THRESHOLD).mean()
-            if frac > 0.2:  # Weak for >20% of the time
-                weak.append(f"String {i}")
-        rows.append({"date": date, "weak_strings": ", ".join(weak)})
-
-    return pd.DataFrame(rows)
-
-
-# -------- Streamlit UI --------
-st.title("SCB String Current Analysis Tool")
-
-file = st.file_uploader("Upload Excel file (Timestamp, String Currents, Irradiance)", type=["xlsx"])
-if file:
-    df = pd.read_excel(file, engine="openpyxl")
-    result = process_file(df)
-
-    st.subheader("Preview of Processed Data")
-    st.dataframe(result.head(20))
-
-    st.subheader("Heatmap of Current Ratio (CR)")
-    plot_heatmap(result)
-
-    st.subheader("Daily Summary of Weak Strings")
-    summary = daily_summary(result)
-    st.dataframe(summary)
-
-    # Download buttons
-    csv = result.reset_index().to_csv(index=False).encode("utf-8")
-    st.download_button("Download Processed Data", csv, "processed_data.csv", "text/csv")
-
-    csv2 = summary.to_csv(index=False).encode("utf-8")
-    st.download_button("Download Daily Summary", csv2, "daily_summary.csv", "text/csv")
+if __name__ == "__main__":
+    main()
