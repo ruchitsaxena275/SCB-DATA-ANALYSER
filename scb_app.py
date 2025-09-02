@@ -10,10 +10,12 @@ VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
 STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
 TEMP_COEFF = 0.05              # 0.5%/°C (adjustable)
-TEMP_COLUMN_INDEX = 22         # Column Z (0-based index 21)
+IRR_COLUMN_INDEX = 24          # Column Y (0-based index 24)
+TEMP_COLUMN_INDEX = 25         # Column Z (0-based index 25)
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
 I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
+
 
 # ----------------- Processing Function -----------------
 def process_file(df):
@@ -22,17 +24,16 @@ def process_file(df):
     df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First column is timestamp
     df = df.set_index(df.columns[0])               # Set datetime index
 
-    irr_col = df.columns[-1]  # Last column is irradiance
-
-    # ✅ Auto-detect or error if temperature column missing
-    if len(df.columns) > TEMP_COLUMN_INDEX:
-        temp_col = df.columns[TEMP_COLUMN_INDEX]
-        temp = df[temp_col].astype(float)
-    else:
-        st.error(f"❌ File does not have a column Z (index {TEMP_COLUMN_INDEX+1}). Please check your Excel file!")
+    # ✅ Explicitly select irradiance and temperature columns
+    if len(df.columns) <= max(IRR_COLUMN_INDEX, TEMP_COLUMN_INDEX):
+        st.error(f"❌ File missing required columns Y (Irradiance) or Z (Temperature). Please check your Excel file!")
         st.stop()
 
+    irr_col = df.columns[IRR_COLUMN_INDEX]
+    temp_col = df.columns[TEMP_COLUMN_INDEX]
+
     irr = df[irr_col].astype(float)
+    temp = df[temp_col].astype(float)
 
     # 🔍 Filter out rows with irradiance <500 W/m²
     df = df[irr >= IRRADIANCE_THRESHOLD]
@@ -48,7 +49,7 @@ def process_file(df):
     df["Expected_SCB_Current"] = expected_scb_current
 
     # 🔢 Calculate CR for each SCB current column
-    scb_cols = df.columns[:-2]  # All but last (irradiance) and Expected
+    scb_cols = [c for i, c in enumerate(df.columns) if i < IRR_COLUMN_INDEX]  # Before Y
     for col in scb_cols:
         df[f"CR_{col}"] = np.where(
             expected_scb_current > 0,
@@ -57,6 +58,7 @@ def process_file(df):
         )
 
     return df
+
 
 # ----------------- Weak SCB Identification -----------------
 def find_weak_scbs(df, threshold=0.90, min_fraction=0.7):
@@ -73,6 +75,7 @@ def find_weak_scbs(df, threshold=0.90, min_fraction=0.7):
     weak_df = pd.DataFrame(list(weak_counts.items()), columns=["SCB", "Weak_%"])
     return weak_df
 
+
 # ----------------- Weak String Color Tagging -----------------
 def tag_weak_strings(df):
     """Add a Weakness Tag column for CSV export."""
@@ -87,10 +90,11 @@ def tag_weak_strings(df):
         )
     return tag_df
 
+
 # ----------------- Streamlit App -----------------
 def main():
     st.title("🔍 SCB Current Analyzer with Temperature-Corrected Expected Current")
-    st.write("Upload SCB-level current data with irradiance & temperature (Column Z). Rows with irradiance <500 W/m² are filtered out for better accuracy.")
+    st.write("Upload SCB-level current data with irradiance (Y) & temperature (Z). Rows with irradiance <500 W/m² are filtered out for accuracy.")
 
     uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
@@ -176,7 +180,6 @@ def main():
             mime="text/csv",
         )
 
+
 if __name__ == "__main__":
     main()
-
-
