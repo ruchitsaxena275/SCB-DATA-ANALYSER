@@ -9,28 +9,37 @@ MODULE_VOC = 49.91             # Voc at STC
 VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
 STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
+TEMP_COEFF = 0.05            # -0.3%/°C (adjustable)
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
 I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
 
 # ----------------- Processing Function -----------------
 def process_file(df):
-    """Calculate Expected SCB Current & CR for each SCB."""
+    """Calculate Temperature-Corrected Expected SCB Current & CR for each SCB."""
     df = df.copy()
     df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First column is timestamp
     df = df.set_index(df.columns[0])               # Set datetime index
 
     irr_col = df.columns[-1]  # Last column is irradiance
+    temp_col = df.columns[25] # Column Z (0-based index 25)
     irr = df[irr_col].astype(float)
+    temp = df[temp_col].astype(float)
 
     # 🔍 Filter out rows with irradiance <500 W/m²
     df = df[irr >= IRRADIANCE_THRESHOLD]
+    irr = irr.loc[df.index]
+    temp = temp.loc[df.index]
 
-    expected_str_current = I_MODULE_STC * (irr[irr >= IRRADIANCE_THRESHOLD] / 1000.0)
+    # 🌡️ Temperature correction factor
+    temp_factor = 1 + TEMP_COEFF * (temp - 25)
+
+    # 📐 Calculate corrected expected current per string
+    expected_str_current = I_MODULE_STC * (irr / 1000.0) * temp_factor
     expected_scb_current = expected_str_current * STRINGS_PER_SCB
     df["Expected_SCB_Current"] = expected_scb_current
 
-    # Calculate CR for each SCB current column
+    # 🔢 Calculate CR for each SCB current column
     scb_cols = df.columns[:-2]  # All but last (irradiance) and Expected
     for col in scb_cols:
         df[f"CR_{col}"] = np.where(
@@ -42,8 +51,8 @@ def process_file(df):
     return df
 
 # ----------------- Weak SCB Identification -----------------
-def find_weak_scbs(df, threshold=0.90, min_fraction=0.7):
-    """Return SCBs weak for at least 70% of time."""
+def find_weak_scbs(df, threshold=0.90, min_fraction=1.0):
+    """Return SCBs weak for at least 100% of time."""
     cr_cols = [col for col in df.columns if col.startswith("CR_")]
     weak_counts = {}
 
@@ -72,8 +81,8 @@ def tag_weak_strings(df):
 
 # ----------------- Streamlit App -----------------
 def main():
-    st.title("🔍 SCB Current Analyzer with Weak SCB Identification")
-    st.write("Upload SCB-level current data with irradiance. Rows with irradiance <500 W/m² are filtered out for better accuracy.")
+    st.title("🔍 SCB Current Analyzer with Temperature-Corrected Expected Current")
+    st.write("Upload SCB-level current data with irradiance & temperature (Column Z). Rows with irradiance <500 W/m² are filtered out for better accuracy.")
 
     uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
@@ -126,10 +135,10 @@ def main():
         # Add Weak Tagging
         tagged_df = tag_weak_strings(df_filtered)
 
-        # Weak SCBs (CR<0.94 for >=30% time)
+        # Weak SCBs
         weak_df = find_weak_scbs(df_filtered)
 
-        st.write("### 🚨 Weak SCBs (CR < 0.90 for ≥80% of time):")
+        st.write("### 🚨 Weak SCBs (CR < 0.90 for ≥100% of time):")
         st.dataframe(weak_df)
 
         # Download Processed Data
@@ -153,7 +162,7 @@ def main():
         # Download Weak SCB List
         csv_weak = weak_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Download Weak SCB List (CR<0.94, >30% Time)",
+            label="📥 Download Weak SCB List (CR<0.90, ≥100% Time)",
             data=csv_weak,
             file_name="weak_scb_summary.csv",
             mime="text/csv",
@@ -161,5 +170,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
