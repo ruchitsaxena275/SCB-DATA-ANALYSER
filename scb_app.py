@@ -9,7 +9,7 @@ MODULE_VOC = 49.91             # Voc at STC
 VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
 STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
-TEMP_COEFF = -0.05              # 0.5%/°C (adjustable)
+TEMP_COEFF = 0.0005              # 0.5%/°C (adjustable)
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
 I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
@@ -180,4 +180,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
