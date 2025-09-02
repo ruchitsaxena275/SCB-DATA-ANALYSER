@@ -2,114 +2,178 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-# --------------------
-# CONFIG
-# --------------------
-st.set_page_config(page_title="SCB Weak String Analyzer", layout="wide")
+# ----------------- Constants -----------------
+MODULE_POWER_WP = 545.0        # Module Watt-peak
+MODULE_VOC = 49.91             # Voc at STC
+VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
+STRINGS_PER_SCB = 18           # Correct number of strings per SCB
+IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
+TEMP_COEFF = -0.003            # -0.3%/°C (adjustable)
+TEMP_COLUMN_INDEX = 25         # Column Z (0-based index 25)
 
-# --------------------
-# FILE PROCESSING
-# --------------------
+VMP = MODULE_VOC * VMP_VOC_RATIO
+I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
+
+# ----------------- Processing Function -----------------
 def process_file(df):
+    """Calculate Temperature-Corrected Expected SCB Current & CR for each SCB."""
     df = df.copy()
+    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])  # First column is timestamp
+    df = df.set_index(df.columns[0])               # Set datetime index
 
-    # Drop completely empty columns
-    df = df.dropna(axis=1, how='all')
+    irr_col = df.columns[-1]  # Last column is irradiance
 
-    # Detect irradiation column (assume first column with values > 100 is irradiation)
-    irr_col = None
-    for col in df.columns:
-        if df[col].dtype != 'object' and df[col].max() > 100:
-            irr_col = col
-            break
+    # ✅ Auto-detect or error if temperature column missing
+    if len(df.columns) > TEMP_COLUMN_INDEX:
+        temp_col = df.columns[TEMP_COLUMN_INDEX]
+        temp = df[temp_col].astype(float)
+    else:
+        st.error(f"❌ File does not have a column Z (index {TEMP_COLUMN_INDEX+1}). Please check your Excel file!")
+        st.stop()
 
-    if irr_col is None:
-        st.error("Irradiation column not found. Please check file.")
-        return None
+    irr = df[irr_col].astype(float)
 
-    # Assume all numeric columns except irradiation are string currents
-    current_cols = [col for col in df.columns if col != irr_col and pd.api.types.is_numeric_dtype(df[col])]
+    # 🔍 Filter out rows with irradiance <500 W/m²
+    df = df[irr >= IRRADIANCE_THRESHOLD]
+    irr = irr.loc[df.index]
+    temp = temp.loc[df.index]
 
-    # Calculate expected current based on irradiation (scaling factor adjustable)
-    df["Expected_Current"] = df[irr_col] / 100  # Assume 10 A at 1000 W/m2
+    # 🌡️ Temperature correction factor
+    temp_factor = 1 + TEMP_COEFF * (temp - 25)
 
-    # Compute Current Ratio for each string
-    for col in current_cols:
-        df[f"{col}_CR"] = df[col] / df["Expected_Current"]
+    # 📐 Calculate corrected expected current per string
+    expected_str_current = I_MODULE_STC * (irr / 1000.0) * temp_factor
+    expected_scb_current = expected_str_current * STRINGS_PER_SCB
+    df["Expected_SCB_Current"] = expected_scb_current
 
-    return df, irr_col, current_cols
+    # 🔢 Calculate CR for each SCB current column
+    scb_cols = df.columns[:-2]  # All but last (irradiance) and Expected
+    for col in scb_cols:
+        df[f"CR_{col}"] = np.where(
+            expected_scb_current > 0,
+            df[col].astype(float) / expected_scb_current,
+            np.nan
+        )
 
-# --------------------
-# WEAK SCB DETECTION
-# --------------------
-def detect_weak_scb(df, current_cols, threshold=0.9):
-    weak_summary = {}
-    weak_flags = pd.DataFrame(index=df.index)
+    return df
 
-    for col in current_cols:
-        cr_col = f"{col}_CR"
-        weak_flags[col] = df[cr_col] < threshold
-        weak_summary[col] = weak_flags[col].any()  # Weak if weak at least once
+# ----------------- Weak SCB Identification -----------------
+def find_weak_scbs(df, threshold=0.90, min_fraction=0.7):
+    """Return SCBs weak for at least 70% of time."""
+    cr_cols = [col for col in df.columns if col.startswith("CR_")]
+    weak_counts = {}
 
-    return weak_summary, weak_flags
+    for col in cr_cols:
+        total = len(df)
+        weak = (df[col] < threshold).sum()
+        if total > 0 and (weak / total) >= min_fraction:
+            weak_counts[col] = round((weak / total) * 100, 2)
 
-# --------------------
-# HEATMAP
-# --------------------
-def plot_heatmap(df, current_cols):
-    cr_cols = [f"{col}_CR" for col in current_cols]
-    cr_data = df[cr_cols]
-    cr_data.columns = current_cols  # Simplify labels
+    weak_df = pd.DataFrame(list(weak_counts.items()), columns=["SCB", "Weak_%"])
+    return weak_df
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    sns.heatmap(cr_data.T, cmap="coolwarm", center=1.0, cbar_kws={'label': 'Current Ratio'}, ax=ax)
-    ax.set_xlabel("Time/Index")
-    ax.set_ylabel("String")
-    ax.set_title("Current Ratio Heatmap")
-    st.pyplot(fig)
+# ----------------- Weak String Color Tagging -----------------
+def tag_weak_strings(df):
+    """Add a Weakness Tag column for CSV export."""
+    tag_df = df.copy()
+    cr_cols = [col for col in tag_df.columns if col.startswith("CR_")]
 
-# --------------------
-# MAIN APP
-# --------------------
+    for col in cr_cols:
+        tag_df[col] = np.select(
+            [tag_df[col] < 0.9, tag_df[col] < 1.0],
+            ["RED", "ORANGE"],
+            default="OK"
+        )
+    return tag_df
+
+# ----------------- Streamlit App -----------------
 def main():
-    st.title("🔍 SCB Weak String Analyzer")
+    st.title("🔍 SCB Current Analyzer with Temperature-Corrected Expected Current")
+    st.write("Upload SCB-level current data with irradiance & temperature (Column Z). Rows with irradiance <500 W/m² are filtered out for better accuracy.")
 
-    uploaded_file = st.file_uploader("Upload your SCB Excel file", type=["xlsx", "xls", "csv"])
+    uploaded_file = st.file_uploader("Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
+        # Read file
         if uploaded_file.name.endswith(".csv"):
             raw_df = pd.read_csv(uploaded_file)
         else:
             raw_df = pd.read_excel(uploaded_file)
 
-        st.success("File uploaded successfully!")
+        st.success("✅ File uploaded successfully!")
+        st.write("### 📜 Raw Data Preview:")
+        st.dataframe(raw_df.head())
 
-        result = process_file(raw_df)
-        if result is None:
+        # Process
+        df_processed = process_file(raw_df)
+
+        if df_processed.empty:
+            st.warning("⚠️ No data available after filtering irradiance <500 W/m²!")
             return
 
-        df, irr_col, current_cols = result
+        # Time Filter
+        min_time = df_processed.index.min()
+        max_time = df_processed.index.max()
+        start_time, end_time = st.slider(
+            "⏱️ Select Time Range",
+            min_value=min_time.to_pydatetime(),
+            max_value=max_time.to_pydatetime(),
+            value=(min_time.to_pydatetime(), max_time.to_pydatetime()),
+            format="HH:mm"
+        )
+        df_filtered = df_processed.loc[start_time:end_time]
 
-        st.subheader("Data Preview")
-        st.dataframe(df.head())
+        st.write(f"### 🔍 Processed Data ({len(df_filtered)} rows):")
+        st.dataframe(df_filtered.head())
 
-        threshold = st.slider("Weakness Threshold (CR)", 0.5, 1.0, 0.9, 0.01)
+        # Plot
+        st.subheader("📈 Current Ratio Trends")
+        cr_cols = [c for c in df_filtered.columns if c.startswith("CR_")]
+        plt.figure(figsize=(12, 5))
+        for col in cr_cols:
+            plt.plot(df_filtered.index, df_filtered[col], alpha=0.5, label=col)
+        plt.axhline(1.0, color="green", linestyle="--")
+        plt.axhline(0.9, color="red", linestyle="--")
+        plt.xlabel("Time")
+        plt.ylabel("CR")
+        plt.legend()
+        plt.grid(True)
+        st.pyplot(plt)
 
-        weak_summary, weak_flags = detect_weak_scb(df, current_cols, threshold)
+        # Add Weak Tagging
+        tagged_df = tag_weak_strings(df_filtered)
 
-        st.subheader("Weak SCB Summary")
-        weak_df = pd.DataFrame.from_dict(weak_summary, orient='index', columns=["Weak"])
+        # Weak SCBs
+        weak_df = find_weak_scbs(df_filtered)
+
+        st.write("### 🚨 Weak SCBs (CR < 0.90 for ≥70% of time):")
         st.dataframe(weak_df)
 
-        st.subheader("Heatmap")
-        plot_heatmap(df, current_cols)
-
+        # Download Processed Data
+        csv_processed = df_filtered.to_csv(index=True).encode('utf-8')
         st.download_button(
-            "Download Weak SCB Report",
-            weak_df.to_csv().encode("utf-8"),
+            label="📥 Download Processed Data (Full Calculations)",
+            data=csv_processed,
+            file_name="processed_scb_data.csv",
+            mime="text/csv",
+        )
+
+        # Download Weak-Tagged CSV
+        csv_tagged = tagged_df.to_csv(index=True).encode('utf-8')
+        st.download_button(
+            label="📥 Download Weak-Tagged CSV",
+            data=csv_tagged,
+            file_name="weak_strings_report.csv",
+            mime="text/csv",
+        )
+
+        # Download Weak SCB List
+        csv_weak = weak_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Weak SCB List (CR<0.90, ≥70% Time)",
+            data=csv_weak,
             file_name="weak_scb_summary.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
 if __name__ == "__main__":
