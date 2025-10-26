@@ -9,7 +9,6 @@ MODULE_VOC = 49.91             # Voc at STC
 VMP_VOC_RATIO = 0.82           # Typical Vmp/Voc ratio
 STRINGS_PER_SCB = 18           # Correct number of strings per SCB
 IRRADIANCE_THRESHOLD = 500.0   # W/m² threshold for filtering
-TEMP_COEFF = -0.05             # 0.5%/°C (adjustable)
 
 VMP = MODULE_VOC * VMP_VOC_RATIO
 I_MODULE_STC = MODULE_POWER_WP / VMP  # ≈13.02 A per module
@@ -25,7 +24,7 @@ def clean_scb_name(col_name):
 
 # ----------------- Processing Function -----------------
 def process_file(df):
-    """Calculate Temperature-Corrected Expected SCB Current & CR for each SCB."""
+    """Calculate Expected SCB Current & CR for each SCB (No Temperature Correction)."""
     df = df.copy()
 
     # Assign column names explicitly based on positions
@@ -33,35 +32,29 @@ def process_file(df):
 
     # Column mapping
     timestamp_col = df.columns[0]       # Column A
-    irradiation_col = df.columns[-2]    # Column BY
-    temperature_col = df.columns[-1]    # Column BZ
+    irradiation_col = df.columns[-1]    # Last column (Irradiation)
 
     df[timestamp_col] = pd.to_datetime(df[timestamp_col])
     df = df.set_index(timestamp_col)
 
-    # Check required columns
-    if irradiation_col not in df.columns or temperature_col not in df.columns:
-        st.error("❌ Missing required Irradiation or Temperature columns! Please verify your file structure.")
+    # Check required column
+    if irradiation_col not in df.columns:
+        st.error("❌ Missing required Irradiation column! Please verify your file structure.")
         st.stop()
 
     irr = df[irradiation_col].astype(float)
-    temp = df[temperature_col].astype(float)
 
     # Filter irradiance <500 W/m²
     df = df[irr >= IRRADIANCE_THRESHOLD]
     irr = irr.loc[df.index]
-    temp = temp.loc[df.index]
 
-    # Temperature correction
-    temp_factor = 1 + TEMP_COEFF * (temp - 25)
-
-    # Expected SCB current
-    expected_str_current = I_MODULE_STC * (irr / 1000.0) * temp_factor
+    # Expected SCB current (no temp correction)
+    expected_str_current = I_MODULE_STC * (irr / 1000.0)
     expected_scb_current = expected_str_current * STRINGS_PER_SCB
     df["Expected_SCB_Current"] = expected_scb_current
 
-    # Select SCB current columns (exclude irradiation & temp)
-    scb_cols = [c for c in df.columns if c not in [irradiation_col, temperature_col]]
+    # Select SCB current columns (exclude irradiation)
+    scb_cols = [c for c in df.columns if c not in [irradiation_col, "Expected_SCB_Current"]]
 
     # Rename SCB columns to clean names
     renamed_map = {col: clean_scb_name(col) for col in scb_cols if "Expected" not in col}
@@ -112,8 +105,8 @@ def tag_weak_strings(df):
 
 # ----------------- Streamlit App -----------------
 def main():
-    st.title("🔍 SCB Current Analyzer (Auto SCB Name Extraction + Temp Correction)")
-    st.write("Upload SCB-level current data with timestamp, SCB currents (B–BW), irradiation (BY), and temperature (BZ).")
+    st.title("🔍 SCB Current Analyzer (Auto SCB Name Extraction - No Temp Correction)")
+    st.write("Upload SCB-level current data with timestamp, SCB currents (B–BW), and irradiation (BY).")
 
     uploaded_file = st.file_uploader("📤 Upload Excel/CSV file", type=["xlsx", "xls", "csv"])
     if uploaded_file is not None:
